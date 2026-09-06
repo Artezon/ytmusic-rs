@@ -2,12 +2,6 @@ use std::path::PathBuf;
 
 use ytmusic::YtMusic;
 
-fn token_path() -> PathBuf {
-    std::env::var_os("YTMUSIC_TOKENS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp/ytmusic-tokens.json"))
-}
-
 fn player_cache() -> PathBuf {
     std::env::var_os("YTMUSIC_PLAYER_CACHE")
         .map(PathBuf::from)
@@ -36,16 +30,8 @@ fn session() -> YtMusic {
         eprintln!("probe: using cookie auth");
         return YtMusic::with_cookies(cookies.trim());
     }
-    match ytmusic::Tokens::load(&token_path()) {
-        Ok(Some(tokens)) => {
-            eprintln!("probe: using tokens from {}", token_path().display());
-            YtMusic::new(tokens).persist_to(token_path())
-        }
-        _ => {
-            eprintln!("probe: anonymous session");
-            YtMusic::anonymous()
-        }
-    }
+    eprintln!("probe: anonymous session");
+    YtMusic::anonymous()
 }
 
 #[tokio::main]
@@ -55,18 +41,6 @@ async fn main() -> anyhow::Result<()> {
     let argument = std::env::args().nth(2).unwrap_or_default();
     let api = client();
     match command.as_str() {
-        "login" => {
-            let http = reqwest::Client::new();
-            let identity = ytmusic::oauth::fetch_identity(&http).await;
-            let device = ytmusic::oauth::request_device_code(&http, &identity).await?;
-            println!(
-                "visit {} and enter code {}",
-                device.verification_url, device.user_code
-            );
-            let tokens = ytmusic::oauth::poll_token(&http, &identity, &device).await?;
-            tokens.save(&token_path())?;
-            println!("tokens saved to {}", token_path().display());
-        }
         "search" => {
             for track in api.search_songs(&argument).await? {
                 println!(
@@ -388,7 +362,7 @@ async fn main() -> anyhow::Result<()> {
         other => {
             eprintln!("unknown command: {other}");
             eprintln!(
-                "usage: probe <login|search|searchalbums|searchplaylists|album|artist|playlist|radio|stream|liked|albums|playlists|profile|suite> [arg]"
+                "usage: probe <search|searchalbums|searchplaylists|album|artist|playlist|radio|stream|liked|albums|playlists|profile|suite> [arg]"
             );
         }
     }

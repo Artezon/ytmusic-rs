@@ -5,7 +5,6 @@ use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
 use crate::context::Client;
-use crate::oauth::{self, Tokens};
 
 const API_BASE: &str = "https://www.youtube.com/youtubei/v1/";
 const MUSIC_API_BASE: &str = "https://music.youtube.com/youtubei/v1/";
@@ -16,23 +15,14 @@ pub struct YtMusic {
     visitor: RwLock<Option<String>>,
     solver: RwLock<Option<std::sync::Arc<crate::deobf::Solver>>>,
     player_cache: Option<PathBuf>,
-    tokens: Option<RwLock<Tokens>>,
     cookies: Option<String>,
     authuser: usize,
-    persist: Option<PathBuf>,
     pub(crate) resolve_cache: crate::dedup::ResolveCache,
     hl: String,
     gl: String,
 }
 
 impl YtMusic {
-    pub fn new(tokens: Tokens) -> Self {
-        Self {
-            tokens: Some(RwLock::new(tokens)),
-            ..Self::anonymous()
-        }
-    }
-
     pub fn with_cookies(cookies: impl Into<String>) -> Self {
         Self {
             cookies: Some(normalize_cookies(&cookies.into())),
@@ -46,10 +36,8 @@ impl YtMusic {
             visitor: RwLock::new(None),
             solver: RwLock::new(None),
             player_cache: None,
-            tokens: None,
             cookies: None,
             authuser: 0,
-            persist: None,
             resolve_cache: crate::dedup::ResolveCache::memory(),
             hl: "en".to_string(),
             gl: "US".to_string(),
@@ -61,11 +49,6 @@ impl YtMusic {
         self
     }
 
-    pub fn persist_to(mut self, path: PathBuf) -> Self {
-        self.persist = Some(path);
-        self
-    }
-
     pub fn cache_resolutions(mut self, path: PathBuf) -> Self {
         self.resolve_cache = crate::dedup::ResolveCache::disk(path);
         self
@@ -74,20 +57,6 @@ impl YtMusic {
     pub fn cache_player(mut self, path: PathBuf) -> Self {
         self.player_cache = Some(path);
         self
-    }
-
-    pub async fn tokens(&self) -> Option<Tokens> {
-        match &self.tokens {
-            Some(tokens) => Some(tokens.read().await.clone()),
-            None => None,
-        }
-    }
-
-    pub async fn revoke(&self) -> Result<()> {
-        let Some(tokens) = self.tokens().await else {
-            return Ok(());
-        };
-        oauth::revoke(&self.http, &tokens).await
     }
 
     pub async fn execute(&self, endpoint: &str, client: Client, payload: Value) -> Result<Value> {
@@ -113,12 +82,8 @@ impl YtMusic {
         use_auth: bool,
         guest: Option<&str>,
     ) -> Result<Value> {
-        let bearer = match use_auth {
-            true => self.bearer().await?,
-            false => None,
-        };
         let cookies = self.cookies.as_ref().filter(|_| use_auth);
-        let authenticated = bearer.is_some() || cookies.is_some();
+        let authenticated = cookies.is_some();
         let held = match authenticated {
             true => String::new(),
             false => match guest {
@@ -151,8 +116,8 @@ impl YtMusic {
             .header("X-Youtube-Client-Name", client.id().to_string())
             .header("X-Youtube-Client-Version", client.version())
             .json(&body);
-        match (cookies, &bearer) {
-            (Some(cookies), _) => {
+        match cookies {
+            Some(cookies) => {
                 let authorization =
                     sid_authorization(cookies, origin).context("cookies have no SAPISID")?;
                 request = request
@@ -161,10 +126,7 @@ impl YtMusic {
                     .header("X-Origin", origin)
                     .header("X-Goog-AuthUser", self.authuser.to_string());
             }
-            (None, Some(bearer)) => {
-                request = request.header("Authorization", format!("Bearer {bearer}"));
-            }
-            (None, None) => request = request.header("X-Goog-Visitor-Id", visitor),
+            None => request = request.header("X-Goog-Visitor-Id", visitor),
         }
         let response = request
             .send()
@@ -206,7 +168,7 @@ impl YtMusic {
     }
 
     pub fn is_authenticated(&self) -> bool {
-        self.cookies.is_some() || self.tokens.is_some()
+        self.cookies.is_some()
     }
 
     pub fn authuser(&self) -> usize {
@@ -269,28 +231,6 @@ impl YtMusic {
 
     pub fn region(&self) -> &str {
         &self.gl
-    }
-
-    async fn bearer(&self) -> Result<Option<String>> {
-        let Some(slot) = &self.tokens else {
-            return Ok(None);
-        };
-        {
-            let tokens = slot.read().await;
-            if !tokens.expired() {
-                return Ok(Some(tokens.access_token.clone()));
-            }
-        }
-        let mut tokens = slot.write().await;
-        if tokens.expired() {
-            oauth::refresh(&self.http, &mut tokens).await?;
-            if let Some(path) = &self.persist
-                && let Err(error) = tokens.save(path)
-            {
-                log::warn!("ytmusic: cannot persist refreshed tokens: {error:#}");
-            }
-        }
-        Ok(Some(tokens.access_token.clone()))
     }
 }
 
